@@ -64,6 +64,7 @@ class TRMModel(nn.Module):
         self.be_loss = nn.BCEWithLogitsLoss()
         self.ema = EMA(self, decay=ema_decay)
         self.active_train_step = 0
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # wandb setup
         self.wandb_project = wandb_project
@@ -78,26 +79,44 @@ class TRMModel(nn.Module):
             "num_solution_recursions": t,
             "num_supervisions": num_supervisions,
             "ema_decay": ema_decay,
-        }, mode="offline")
+        })
     
     def latent_recursion(self, x, y, z):
+        position_ids = torch.arange(self.seq_len+1, device=self.device).unsqueeze(0).expand(x.size(0), -1)
+        attention_mask = torch.ones_like(position_ids, device=self.device).float()
         for _ in range(self.num_latent_recursions):
-            z = self.model.layers(x + y + z)
-        y = self.model.layers(y + z)
+            z_input = x + y + z
+            for layer_ind in range(len(self.model.layers)):
+                z_input = self.model.layers[layer_ind](
+                    z_input, 
+                    position_ids=position_ids, 
+                    attention_mask=attention_mask
+                )
+            z = z_input
+        y_input = y + z
+        for layer_ind in range(len(self.model.layers)):
+            y_input = self.model.layers[layer_ind](
+                y_input, 
+                position_ids=position_ids, 
+                attention_mask=attention_mask
+            )
+        y = y_input
         return y, z
     
-    def forward(self, batch):
-        z = torch.empty((len(batch, self.seq_len, self.config.hidden_size)), device=self.device)
-        y = torch.empty((len(batch, self.seq_len, self.config.hidden_size)), device=self.device)
+    def forward(self, batch, y=None, z=None):
+        if not isinstance(z, torch.Tensor):
+            z = torch.empty((len(batch["question_input_ids"]), self.seq_len+1, self.config.hidden_size), device=self.device)
+        if not isinstance(y, torch.Tensor):
+            y = torch.empty((len(batch["question_input_ids"]), self.seq_len+1, self.config.hidden_size), device=self.device)
         x = self.model.embeddings(batch["question_input_ids"])
         with torch.no_grad():
             for _ in range(self.num_solution_recursions-1):
                 y, z = self.latent_recursion(x, y, z)
             y, z = self.latent_recursion(x, y, z)
         return y, z, self.model.lm_head(y[:, 1:]), self.q(y[:, 0]).squeeze(-1)
-    
-    def training_step(self, batch, batch_idx=None):
-        y, z, logits, q = self(batch)
+
+    def training_step(self, batch, y=None, z=None, batch_idx=None):
+        y, z, logits, q = self(batch, y=y, z=z)
         # mask loss for numbers already present on the board
         batch["answer_input_ids"][batch["question_input_ids"]!=0] = -100
         ce_loss_val = self.ce_loss(logits.view(-1, self.config.vocab_size), batch["answer_input_ids"].view(-1))
@@ -115,7 +134,7 @@ class TRMModel(nn.Module):
             "train/q_mean": q.mean().item(),
         }
         wandb.log(metrics, step=self.active_train_step)
-        return loss, q
+        return loss, y, z, q
     
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=1e-4, betas=(0.9, 0.95))
@@ -135,8 +154,9 @@ class TRMModel(nn.Module):
                 if do_end_training:
                     break
                 optimizer.zero_grad()
+                y, z = None, None
                 for _ in range(self.num_supervisions):
-                    loss, q = self.training_step(batch)
+                    loss, y, z, q = self.training_step(batch, y=y, z=z)
                     loss.backward()
                     optimizer.step()
                     self.active_train_step += 1

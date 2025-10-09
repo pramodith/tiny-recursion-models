@@ -23,8 +23,10 @@ def get_sudoku_dataset(split:str="train", num_samples:int=None):
 
 def get_dataloader(split:str="train", batch_size:int=32):
     dataset = get_sudoku_dataset(split)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return DataLoader(dataset.with_format("torch"), batch_size=batch_size, shuffle=True)
 
 if __name__ == "__main__":
-    ds = get_sudoku_dataset("train")
-    print(ds["question_input_ids"][0])
+    dataloader = get_dataloader("train", batch_size=2)
+    for batch in dataloader:
+        print(batch)
+        break
