@@ -108,17 +108,17 @@ class SudokuConstraintLayer(nn.Module):
         
         # Reshape to group 3x3 boxes
         # Each 3x3 box becomes a separate dimension
-        boxes = x.view(batch_size, 3, 3, 3, 3, channels)  # (batch, 3, 3, 3, 3, channels)
+        boxes = x.reshape(batch_size, 3, 3, 3, 3, channels)  # (batch, 3, 3, 3, 3, channels)
         boxes = boxes.permute(0, 1, 3, 2, 4, 5)  # (batch, 3, 3, 3, 3, channels)
-        boxes = boxes.contiguous().view(batch_size, 9, 9, channels)  # Flatten boxes
+        boxes = boxes.contiguous().reshape(batch_size, 9, 9, channels)  # Flatten boxes
         
         # Apply box encoding
         box_encoded = self.box_encoder(boxes)
         
         # Reshape back to original format
-        box_encoded = box_encoded.view(batch_size, 3, 3, 3, 3, channels)
+        box_encoded = box_encoded.reshape(batch_size, 3, 3, 3, 3, channels)
         box_encoded = box_encoded.permute(0, 1, 3, 2, 4, 5)
-        box_encoded = box_encoded.view(batch_size, height, width, channels)
+        box_encoded = box_encoded.contiguous().reshape(batch_size, height, width, channels)
         
         return box_encoded
 
@@ -296,8 +296,7 @@ class TinyRecursionModel(pl.LightningModule):
             optimizer, 
             mode='min',
             factor=0.5,
-            patience=5,
-            verbose=True
+            patience=5
         )
         
         return {
