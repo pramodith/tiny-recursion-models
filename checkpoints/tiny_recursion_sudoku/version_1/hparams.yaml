@@ -1,7 +1,0 @@
-hidden_dim: 32
-input_dim: 1
-learning_rate: 0.001
-num_digits: 9
-num_layers: 2
-num_recursive_steps: 3
-weight_decay: 0.0001
