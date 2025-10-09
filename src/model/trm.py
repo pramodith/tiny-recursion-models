@@ -1,8 +1,12 @@
 from transformers import ModernBertModel, ModernBertConfig
-from lightning import LightningModule
+from typing import Optional
 from torch import nn
 import torch
 from torch import optim
+from tqdm import tqdm
+import wandb
+from datetime import datetime
+from math import ceil
 
 class EMA:
     def __init__(self, model: nn.Module, decay: float = 0.999):
@@ -17,7 +21,7 @@ class EMA:
     def apply_ema_weights(self):
         self.model.load_state_dict(self.ema_state)
 
-class TRMModel(LightningModule):
+class TRMModel(nn.Module):
     def __init__(
         self, 
         vocab_size: int = 14, 
@@ -29,6 +33,8 @@ class TRMModel(LightningModule):
         t: int = 3,
         num_supervisions: int = 16,
         ema_decay: float = 0.999,
+        wandb_project: str = "tiny-recursion-models",
+        wandb_run_name: str = None,
     ):
         super().__init__()
         # TODO: Use swiglu activation in feedforward layers
@@ -57,6 +63,22 @@ class TRMModel(LightningModule):
         self.ce_loss = nn.CrossEntropyLoss()
         self.be_loss = nn.BCEWithLogitsLoss()
         self.ema = EMA(self, decay=ema_decay)
+        self.active_train_step = 0
+
+        # wandb setup
+        self.wandb_project = wandb_project
+        self.wandb_run_name = wandb_run_name if wandb_run_name else datetime.now().isoformat()
+        self.wandb_run = wandb.init(project=self.wandb_project, name=self.wandb_run_name, config={
+            "vocab_size": vocab_size,
+            "hidden_size": hidden_size,
+            "num_attention_heads": num_attention_heads,
+            "max_position_embeddings": max_position_embeddings,
+            "seq_len": seq_len,
+            "num_latent_recursions": n,
+            "num_solution_recursions": t,
+            "num_supervisions": num_supervisions,
+            "ema_decay": ema_decay,
+        }, mode="offline")
     
     def latent_recursion(self, x, y, z):
         for _ in range(self.num_latent_recursions):
@@ -78,30 +100,54 @@ class TRMModel(LightningModule):
         y, z, logits, q = self(batch)
         # mask loss for numbers already present on the board
         batch["answer_input_ids"][batch["question_input_ids"]!=0] = -100
-        loss = self.ce_loss(logits.view(-1, self.config.vocab_size), batch["answer_input_ids"].view(-1))
+        ce_loss_val = self.ce_loss(logits.view(-1, self.config.vocab_size), batch["answer_input_ids"].view(-1))
         y_preds = torch.argmax(logits, dim=-1)
         y_trues = batch["answer_input_ids"][:, 1:]
-        loss += self.be_loss(q, (y_trues==y_preds).float())
-        self.log("train/loss", loss)
+        be_loss_val = self.be_loss(q, (y_trues==y_preds).float())
+        loss = ce_loss_val + be_loss_val
+
+        # wandb logging
+        metrics = {
+            "train/loss": loss.item(),
+            "train/ce_loss": ce_loss_val.item(),
+            "train/be_loss": be_loss_val.item(),
+            "train/step": self.active_train_step,
+            "train/q_mean": q.mean().item(),
+        }
+        wandb.log(metrics, step=self.active_train_step)
         return loss, q
     
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=1e-4, betas=(0.9, 0.95))
         return optimizer
 
-    def train(self, dataloader, num_steps:int=1000):
+    def train(self, dataloader, num_epochs: Optional[int] = 1, num_steps: Optional[int] = None):
+        do_end_training = False
+        if num_epochs is None and num_steps is None:
+            raise ValueError("Either num_epochs or num_steps must be provided.")
+        num_epochs = ceil(num_steps / len(dataloader)) if num_steps is not None else num_epochs
         optimizer = self.configure_optimizers()
-        for batch in dataloader:
-            optimizer.zero_grad()
-            for _ in range(self.num_solution_recursions-1):
-                loss, q = self.training_step(batch)
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                if torch.all(q > 0.5):
+        for epoch in tqdm(range(num_epochs), desc="Epoch Number: "):
+            wandb.log({"epoch": epoch})
+            if do_end_training:
+                break
+            for batch in tqdm(dataloader, desc="Batch Number: "):
+                if do_end_training:
                     break
-
-
+                optimizer.zero_grad()
+                for _ in range(self.num_supervisions):
+                    loss, q = self.training_step(batch)
+                    loss.backward()
+                    optimizer.step()
+                    self.active_train_step += 1
+                    optimizer.zero_grad()
+                    if num_steps is not None and self.active_train_step >= num_steps:
+                        do_end_training = True
+                        break
+                    # Sigmoid(0) = 0.5, so we check if q > 0 for all elements to stop 
+                    if torch.all(q > 0):
+                        break
+        wandb.finish()
         return loss
 
 if __name__ == "__main__":
