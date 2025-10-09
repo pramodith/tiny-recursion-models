@@ -1,0 +1,29 @@
+# Configuration file for Tiny Recursion Models
+
+# Model configuration
+model:
+  hidden_dim: 64
+  num_recursive_steps: 5
+  num_layers: 3
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+# Data configuration
+data:
+  dataset_name: "sapientinc/sudoku-extreme-1k"
+  batch_size: 32
+  num_workers: 4
+  val_split: 0.2
+
+# Training configuration
+training:
+  max_epochs: 50
+  patience: 10
+  accelerator: "auto"
+  devices: 1
+  
+# Logging configuration
+logging:
+  save_dir: "./checkpoints"
+  experiment_name: "tiny_recursion_sudoku"
+  log_every_n_steps: 50
