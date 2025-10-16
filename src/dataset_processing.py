@@ -1,5 +1,6 @@
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+import torch
 
 def get_sudoku_dataset(split:str="train", num_samples:int=None):
     split = split if num_samples is None else f"{split}[:{num_samples}]"
@@ -21,9 +22,11 @@ def get_sudoku_dataset(split:str="train", num_samples:int=None):
     )
     return dataset.select_columns(["question_input_ids", "answer_input_ids"])
 
-def get_dataloader(split:str="train", batch_size:int=32):
+def get_dataloader(split:str="train", batch_size:int=32, seed:int=42):
     dataset = get_sudoku_dataset(split)
-    return DataLoader(dataset.with_format("torch"), batch_size=batch_size, shuffle=True)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(dataset.with_format("torch"), batch_size=batch_size, shuffle=True, generator=generator)
 
 if __name__ == "__main__":
     dataloader = get_dataloader("train", batch_size=2)
