@@ -203,6 +203,8 @@ class TRMModel(nn.Module):
         return y_input, z_input
     
     def forward(self, batch, y=None, z=None):
+        batch["question_input_ids"] = batch["question_input_ids"].to(self.device)
+        batch["answer_input_ids"] = batch["answer_input_ids"].to(self.device)
         batch_size = len(batch["question_input_ids"])
         if not isinstance(z, torch.Tensor):
             # Broadcast seed to batch; clone to ensure no inadvertent in-place ops mutate buffer.
