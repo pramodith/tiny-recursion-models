@@ -13,11 +13,11 @@ def get_sudoku_dataset(split:str="train", num_samples:int=None):
             "answer": example["answer"].replace(".", "0")
         },
     )
-    # 12 is bos/cls token, will be used for determining if we should stop recursion early
+    # 10 is bos/cls token, will be used for determining if we should stop recursion early
     dataset = dataset.map(
         lambda example: {
-            "question_input_ids": [12] + [int(c) for c in example["question"]],
-            "answer_input_ids": [12] + [int(c) for c in example["answer"]]
+            "question_input_ids": [10] + [int(c) for c in example["question"]],
+            "answer_input_ids": [10] + [int(c) for c in example["answer"]]
         },
     )
     return dataset.select_columns(["question_input_ids", "answer_input_ids"])

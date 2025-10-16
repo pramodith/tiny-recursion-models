@@ -10,8 +10,15 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 from datetime import datetime
-from math import ceil
+from math import ceil, sqrt
 
+
+# ----------------------------------------------------------------------
+# Helper: truncated normal initialization similar to reference code.
+# Wraps nn.init.trunc_normal_ for convenience.
+# ----------------------------------------------------------------------
+def trunc_normal_init_(tensor: torch.Tensor, std: float = 0.02, mean: float = 0.0):
+    return nn.init.trunc_normal_(tensor, mean=mean, std=std, a=mean - 2*std, b=mean + 2*std)
 
 # --- SwiGLU activation function ---
 class SwiGLU(nn.Module):
@@ -32,8 +39,14 @@ class PatchedModernBertModel(nn.Module):
         # Use the original ModernBertModel for embeddings and other logic
         from transformers import ModernBertModel as OrigModernBertModel
         self.base = OrigModernBertModel(config)
-        self.base.embeddings.norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
-        # Patch encoder layers to use SwiGLU
+        self.base.embeddings.tok_embeddings = nn.Embedding(
+            config.vocab_size, config.hidden_size, padding_idx=None
+        )
+        # Initialize embedding weights with trunc_normal_init_
+        trunc_normal_init_(
+            self.base.embeddings.tok_embeddings.weight, std=1/sqrt(config.hidden_size), mean=0.0
+        )
+        self.base.embeddings.norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)        # Patch encoder layers to use SwiGLU
         for layer in self.base.layers:
            layer.attn_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
            layer.mlp_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
@@ -66,13 +79,6 @@ class EMA:
     def apply_ema_weights(self):
         self.model.load_state_dict(self.ema_state)
 
-# ----------------------------------------------------------------------
-# Helper: truncated normal initialization similar to reference code.
-# Wraps nn.init.trunc_normal_ for convenience.
-# ----------------------------------------------------------------------
-def trunc_normal_init_(tensor: torch.Tensor, std: float = 0.02, mean: float = 0.0):
-    return nn.init.trunc_normal_(tensor, mean=mean, std=std, a=mean - 2*std, b=mean + 2*std)
-
 
 class CastedLinear(nn.Module):
     """Linear layer with dtype casting and truncated LeCun normal init.
@@ -97,7 +103,7 @@ class CastedLinear(nn.Module):
 class TRMModel(nn.Module):
     def __init__(
         self, 
-        vocab_size: int = 14, 
+        vocab_size: int = 11, 
         hidden_size: int = 512,
         num_attention_heads: int = 8,
         max_position_embeddings: int = 81 + 1, # +1 for cls token
@@ -121,11 +127,11 @@ class TRMModel(nn.Module):
             num_attention_heads=num_attention_heads,
             max_position_embeddings=max_position_embeddings,
             repad_logits_with_grad=True,
-            pad_token_id=13,
-            eos_token_id=11,
-            bos_token_id=12,
-            cls_token_id=12,
-            sep_token_id=11,
+            pad_token_id=10,
+            eos_token_id=10,
+            bos_token_id=10,
+            cls_token_id=10,
+            sep_token_id=10,
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seq_len = seq_len
@@ -153,14 +159,13 @@ class TRMModel(nn.Module):
         # Weight ~ N(0, 1/sqrt(in_features)) truncated to bounds (mean±2*std).
         # Bias omitted (bias=False) for parity with common LM heads.
         # ------------------------------------------------------------------
-        self.lm_head = CastedLinear(hidden_size, vocab_size, bias=False)
-        self.q = nn.Linear(hidden_size, 1)
+        self.lm_head = CastedLinear(hidden_size, vocab_size)
+        self.q = CastedLinear(hidden_size, 1)
         self.num_latent_recursions = n
         self.num_solution_recursions = t
         self.num_supervisions = num_supervisions
         self.ce_loss = nn.CrossEntropyLoss()
         self.be_loss = nn.BCEWithLogitsLoss()
-        self.ema = EMA(self, decay=ema_decay)
         self.active_train_step = 0
 
         # wandb setup
@@ -181,6 +186,8 @@ class TRMModel(nn.Module):
             "ema_decay": ema_decay,
         })
         self.to(self.device)
+        self.ema = EMA(self, decay=ema_decay)
+
     
     def latent_recursion(self, x, y, z):
         position_ids = torch.arange(self.seq_len+1, device=self.device).unsqueeze(0).expand(x.size(0), -1)
@@ -192,6 +199,8 @@ class TRMModel(nn.Module):
                     position_ids=position_ids, 
                     attention_mask=None
                 )[0]
+                with torch.no_grad():
+                    print(f"Mean of z_input after layer {layer_ind}: {z_input.mean().item()}")
             z = z_input
         y_input = y + z
         for layer_ind in range(len(self.model.base.layers)):
@@ -200,6 +209,8 @@ class TRMModel(nn.Module):
                 position_ids=position_ids, 
                 attention_mask=None
             )[0]
+            with torch.no_grad():
+                print(f"Mean of y_input after layer {layer_ind}: {y_input.mean().item()}")
         return y_input, z_input
     
     def forward(self, batch, y=None, z=None):
@@ -261,10 +272,11 @@ class TRMModel(nn.Module):
             raise ValueError("Either num_epochs or num_steps must be provided.")
         num_epochs = ceil(num_steps / len(dataloader)) if num_steps is not None else num_epochs
         optimizer = self.configure_optimizers()
-        # Scheduler: 2k warmup steps, then cosine decay
         total_steps = num_steps if num_steps is not None else num_epochs * len(dataloader)
-        warmup_steps = 2000
-        scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+        # Scheduler: 2k warmup steps, then cosine decay
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+        )
         for epoch in tqdm(range(num_epochs), desc="Epoch Number: "):
             wandb.log({"epoch": epoch})
             if do_end_training:
@@ -283,7 +295,7 @@ class TRMModel(nn.Module):
                     wandb.log({"train/lr": current_lr}, step=self.active_train_step)
                     self.active_train_step += 1
                     optimizer.zero_grad()
-                    self.ema.update()
+                    # self.ema.update()
                     if num_steps is not None and self.active_train_step >= num_steps:
                         do_end_training = True
                         break
