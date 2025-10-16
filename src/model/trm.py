@@ -1,6 +1,6 @@
 import random
 import numpy as np
-from transformers import ModernBertModel, ModernBertConfig
+from transformers import ModernBertConfig
 from typing import Optional
 from torch import nn
 import torch
@@ -12,6 +12,34 @@ import wandb
 from datetime import datetime
 from math import ceil
 
+
+# --- SwiGLU activation function ---
+class SwiGLU(nn.Module):
+    def __init__(self, hidden_size:int, intermediate_size: int):
+        super().__init__()
+        self.gate_up_proj = nn.Linear(hidden_size, intermediate_size * 2)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size)
+
+    def forward(self, x):
+        gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+        out = F.silu(gate) * up
+        return self.down_proj(out)
+
+
+class PatchedModernBertModel(nn.Module):
+    def __init__(self, config: ModernBertConfig, rms_norm_eps: float = 1e-5):
+        super().__init__()
+        # Use the original ModernBertModel for embeddings and other logic
+        from transformers import ModernBertModel as OrigModernBertModel
+        self.base = OrigModernBertModel(config)
+        self.base.embeddings.norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
+        # Patch encoder layers to use SwiGLU
+        for layer in self.base.layers:
+           layer.attn_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
+           layer.mlp_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
+           layer.mlp = SwiGLU(config.hidden_size, config.intermediate_size)
+    def forward(self, *args, **kwargs):
+        return self.base(*args, **kwargs)
 # ----------------------------------------------------------------------
 # Set global random seed for reproducibility
 # ----------------------------------------------------------------------
@@ -102,6 +130,8 @@ class TRMModel(nn.Module):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seq_len = seq_len
 
+        self.model = PatchedModernBertModel(config=self.config)
+
         # ------------------------------------------------------------------
         # State seeds (reference-style): instead of using torch.empty during
         # forward, we keep fixed (non-trainable) truncated normal seeds that
@@ -117,7 +147,6 @@ class TRMModel(nn.Module):
             z_seed.normal_(mean=0.0, std=0.02)
         self.register_buffer("y_seed", y_seed, persistent=True)
         self.register_buffer("z_seed", z_seed, persistent=True)
-        self.model = ModernBertModel(config=self.config)
 
         # ------------------------------------------------------------------
         # LM Head using CastedLinear with truncated LeCun normal init.
@@ -157,16 +186,16 @@ class TRMModel(nn.Module):
         position_ids = torch.arange(self.seq_len+1, device=self.device).unsqueeze(0).expand(x.size(0), -1)
         for _ in range(self.num_latent_recursions):
             z_input = x + y + z
-            for layer_ind in range(len(self.model.layers)):
-                z_input = self.model.layers[layer_ind](
+            for layer_ind in range(len(self.model.base.layers)):
+                z_input = self.model.base.layers[layer_ind](
                     z_input, 
                     position_ids=position_ids, 
                     attention_mask=None
                 )[0]
             z = z_input
         y_input = y + z
-        for layer_ind in range(len(self.model.layers)):
-            y_input = self.model.layers[layer_ind](
+        for layer_ind in range(len(self.model.base.layers)):
+            y_input = self.model.base.layers[layer_ind](
                 y_input, 
                 position_ids=position_ids, 
                 attention_mask=None
@@ -180,7 +209,7 @@ class TRMModel(nn.Module):
             z = self.z_seed.unsqueeze(0).expand(batch_size, -1, -1).clone()
         if not isinstance(y, torch.Tensor):
             y = self.y_seed.unsqueeze(0).expand(batch_size, -1, -1).clone()
-        x = self.model.embeddings(batch["question_input_ids"])
+        x = self.model.base.embeddings(batch["question_input_ids"])
         with torch.no_grad():
             for _ in range(self.num_solution_recursions-1):
                 y, z = self.latent_recursion(x, y, z)
@@ -249,10 +278,10 @@ class TRMModel(nn.Module):
                     scheduler.step()
                     # Log current learning rate
                     current_lr = optimizer.param_groups[0]['lr']
-                    print(f"Current learning rate: {current_lr}")
                     wandb.log({"train/lr": current_lr}, step=self.active_train_step)
                     self.active_train_step += 1
                     optimizer.zero_grad()
+                    self.ema.update()
                     if num_steps is not None and self.active_train_step >= num_steps:
                         do_end_training = True
                         break
