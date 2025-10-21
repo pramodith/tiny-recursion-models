@@ -48,7 +48,7 @@ class PatchedModernBertModel(nn.Module):
         )
         self.base.embeddings.norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)        # Patch encoder layers to use SwiGLU
         for layer in self.base.layers:
-           layer.attn_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
+           layer.attn_norm = nn.Identity()
            layer.mlp_norm = nn.RMSNorm(config.hidden_size, eps=rms_norm_eps)
            layer.mlp = SwiGLU(config.hidden_size, config.intermediate_size)
     def forward(self, *args, **kwargs):
@@ -137,6 +137,7 @@ class TRMModel(nn.Module):
         self.seq_len = seq_len
 
         self.model = PatchedModernBertModel(config=self.config)
+        self.post_layer_norm = [nn.RMSNorm(hidden_size, eps=1e-5) for _ in range(self.config.num_hidden_layers)]
 
         # ------------------------------------------------------------------
         # State seeds (reference-style): instead of using torch.empty during
@@ -199,8 +200,9 @@ class TRMModel(nn.Module):
                     position_ids=position_ids, 
                     attention_mask=None
                 )[0]
-                with torch.no_grad():
-                    print(f"Mean of z_input after layer {layer_ind}: {z_input.mean().item()}")
+                z_input = self.post_layer_norm[layer_ind](z_input)
+                # with torch.no_grad():
+                #     print(f"Mean of z_input after layer {layer_ind}: {z_input.mean().item()}")
             z = z_input
         y_input = y + z
         for layer_ind in range(len(self.model.base.layers)):
@@ -209,8 +211,9 @@ class TRMModel(nn.Module):
                 position_ids=position_ids, 
                 attention_mask=None
             )[0]
-            with torch.no_grad():
-                print(f"Mean of y_input after layer {layer_ind}: {y_input.mean().item()}")
+            y_input = self.post_layer_norm[layer_ind](y_input)
+            # with torch.no_grad():
+            #     print(f"Mean of y_input after layer {layer_ind}: {y_input.mean().item()}")
         return y_input, z_input
     
     def forward(self, batch, y=None, z=None):
