@@ -105,8 +105,6 @@ def main():
 		wandb_run_name=args.wandb_run_name,
 		do_log=not args.no_log,
 	)
-	# Move model to selected device (ensures proper placement even if internal logic already ran)
-	model.to(device)
 
 	fit_kwargs = dict(
 		num_steps=args.num_steps if args.num_steps else None,
