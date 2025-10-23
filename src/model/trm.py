@@ -138,7 +138,10 @@ class TRMModel(nn.Module):
         self.seq_len = seq_len
 
         self.model = PatchedModernBertModel(config=self.config)
-        self.post_layer_norm = [nn.RMSNorm(hidden_size, eps=1e-5) for _ in range(self.config.num_hidden_layers)]
+        # Use ModuleList so norms move with .to(device)
+        self.post_layer_norm = nn.ModuleList([
+            nn.RMSNorm(hidden_size, eps=1e-5) for _ in range(self.config.num_hidden_layers)
+        ])
 
         # ------------------------------------------------------------------
         # State seeds (reference-style): instead of using torch.empty during
@@ -252,7 +255,7 @@ class TRMModel(nn.Module):
         return loss, y, z, q
 
     @torch.no_grad()
-    def evaluate(self, dataloader):
+    def evaluate(self, dataloader, prefix: str = "val"):
         """Run validation over a dataloader.
 
         Computes:
@@ -285,16 +288,16 @@ class TRMModel(nn.Module):
         tile_accuracy = total_correct_tiles / max(1, total_tiles)
         puzzle_accuracy = solved_puzzles / max(1, total_puzzles)
         metrics = {
-            "val/loss": avg_loss,
-            "val/ce_loss": avg_ce_loss,
-            "val/be_loss": avg_be_loss,
-            "val/tile_accuracy": tile_accuracy,
-            "val/puzzle_accuracy": puzzle_accuracy,
+            f"{prefix}/loss": avg_loss,
+            f"{prefix}/ce_loss": avg_ce_loss,
+            f"{prefix}/be_loss": avg_be_loss,
+            f"{prefix}/tile_accuracy": tile_accuracy,
+            f"{prefix}/puzzle_accuracy": puzzle_accuracy,
             "train/step": self.active_train_step,
-            "val/total_correct_tiles": total_correct_tiles,
-            "val/solved_puzzles": solved_puzzles,
+            f"{prefix}/total_correct_tiles": total_correct_tiles,
+            f"{prefix}/solved_puzzles": solved_puzzles,
         }
-        print(f"Validation metrics at step {self.active_train_step}: {metrics}")
+        print(f"{prefix.capitalize()} metrics at step {self.active_train_step}: {metrics}")
         wandb.log(metrics, step=self.active_train_step)
         self.train()
         return metrics

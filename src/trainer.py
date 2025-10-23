@@ -14,6 +14,7 @@ If both --num_steps and --num_epochs are provided, num_steps takes precedence.
 """
 
 import argparse
+import torch
 from model.trm import TRMModel
 from dataset_processing import get_dataloader
 
@@ -22,11 +23,16 @@ def build_arg_parser():
 	p = argparse.ArgumentParser(description="Train Tiny Recursion Model")
 	# Data params
 	p.add_argument("--train_split", default="train", help="HF dataset split for training")
-	p.add_argument("--val_split", default="test", help="HF dataset split for validation (first 2000 taken if num_val_samples set)")
+	p.add_argument("--val_split", default="test_hard", help="HF dataset split for validation (first 2000 taken if num_val_samples set)")
 	p.add_argument("--train_batch_size", type=int, default=128)
 	p.add_argument("--val_batch_size", type=int, default=128)
 	p.add_argument("--num_train_samples", type=int, default=None, help="Optional limit on number of training samples")
 	p.add_argument("--num_val_samples", type=int, default=2000, help="Number of validation samples (first N) or None for full split")
+	# Test params
+	p.add_argument("--test_split", default="test_hard", help="Split name for test evaluation")
+	p.add_argument("--test_batch_size", type=int, default=128)
+	p.add_argument("--test_last_n", type=int, default=18000, help="Select last N examples from test split")
+	p.add_argument("--run_test", action="store_true", help="Evaluate on test split after training")
 	# Optimization params
 	p.add_argument("--num_steps", type=int, default=2000, help="Total training steps (supervision loops counted)")
 	p.add_argument("--num_epochs", type=int, default=None, help="Epochs (ignored if num_steps provided)")
@@ -46,12 +52,31 @@ def build_arg_parser():
 	p.add_argument("--no_log", action="store_true", help="Disable wandb logging")
 	p.add_argument("--wandb_project", default="tiny-recursion-models")
 	p.add_argument("--wandb_run_name", default=None)
+	# Device selection
+	p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Execution device: auto picks cuda if available else cpu")
 	return p
 
 
 def main():
 	parser = build_arg_parser()
 	args = parser.parse_args()
+
+	# Resolve device
+	if args.device == "auto":
+		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	elif args.device == "cuda":
+		if not torch.cuda.is_available():
+			raise RuntimeError("CUDA requested but not available.")
+		device = torch.device("cuda")
+	else:
+		device = torch.device("cpu")
+
+	if device.type == "cuda":
+		# Ensure single GPU usage; optionally one could allow index override later
+		torch.cuda.set_device(0)
+		print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+	else:
+		print("Using CPU")
 
 	# Dataloaders
 	train_loader = get_dataloader(
@@ -80,6 +105,8 @@ def main():
 		wandb_run_name=args.wandb_run_name,
 		do_log=not args.no_log,
 	)
+	# Move model to selected device (ensures proper placement even if internal logic already ran)
+	model.to(device)
 
 	fit_kwargs = dict(
 		num_steps=args.num_steps if args.num_steps else None,
@@ -91,6 +118,15 @@ def main():
 		save_top_k=args.save_top_k,
 	)
 	model.fit(train_loader, **fit_kwargs)
+
+	if args.run_test:
+		print("\nRunning test evaluation...")
+		test_loader = get_dataloader(
+			args.test_split,
+			batch_size=args.test_batch_size,
+			last_num_samples=args.test_last_n,
+		)
+		model.evaluate(test_loader, prefix="test")
 
 
 if __name__ == "__main__":
