@@ -142,6 +142,8 @@ class TRMModel(nn.Module):
         self.post_layer_norm = nn.ModuleList([
             nn.RMSNorm(hidden_size, eps=1e-5) for _ in range(self.config.num_hidden_layers)
         ])
+        # Explicitly move post_layer_norm to the correct device
+        self.post_layer_norm = self.post_layer_norm.to(self.device)
 
         # ------------------------------------------------------------------
         # State seeds (reference-style): instead of using torch.empty during
