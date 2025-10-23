@@ -11,6 +11,7 @@ from tqdm import tqdm
 import wandb
 from datetime import datetime
 from math import ceil, sqrt
+import os
 
 
 # ----------------------------------------------------------------------
@@ -234,42 +235,122 @@ class TRMModel(nn.Module):
 
     def training_step(self, batch, y=None, z=None, batch_idx=None):
         y, z, logits, q = self(batch, y=y, z=z)
-        # ------------------------------------------------------------------
-        # Cross-entropy masking: ignore positions that were already given in
-        # the original puzzle (question_input_ids != 0). We clone labels so
-        # the dataloader's underlying tensor is not mutated (important when
-        # using multiple supervisions / workers). CLS at index 0 is excluded
-        # from logits so we slice from 1: for labels.
-        # ------------------------------------------------------------------
-        ce_labels = batch["answer_input_ids"][:, 1:].reshape(-1).clone()
-        ce_labels[batch["question_input_ids"][:, 1:].reshape(-1) != 0] = -100
-        ce_loss_val = self.ce_loss(logits.view(-1, self.config.vocab_size), ce_labels)
-        y_preds = torch.argmax(logits, dim=-1)
-        y_trues = batch["answer_input_ids"][:, 1:]
-        # Sequence-level correctness (exact match across all predicted cells)
-        # drives the binary Q-head target. Consider restricting to fillable
-        # cells only or using a softer proportional accuracy target if this
-        # proves too sparse early in training.
-        be_loss_val = self.be_loss(q, torch.all(y_trues==y_preds, dim=-1).float())
-        loss = ce_loss_val + be_loss_val
-
-        # wandb logging
+        stats = self._compute_batch_stats(batch, logits, q)
+        loss = stats["loss"]
+        # wandb logging (include tile/puzzle metrics)
         metrics = {
-            "train/loss": loss.item(),
-            "train/ce_loss": ce_loss_val.item(),
-            "train/be_loss": be_loss_val.item(),
+            "train/loss": stats["loss"].item(),
+            "train/ce_loss": stats["ce_loss"].item(),
+            "train/be_loss": stats["be_loss"].item(),
+            "train/tile_accuracy": stats["tile_accuracy"],
+            "train/puzzle_accuracy": stats["puzzle_accuracy"],
             "train/step": self.active_train_step,
             "train/q_mean": q.mean().item(),
         }
         print(f"Metrics at step {self.active_train_step}: {metrics}")
         wandb.log(metrics, step=self.active_train_step)
         return loss, y, z, q
+
+    @torch.no_grad()
+    def evaluate(self, dataloader):
+        """Run validation over a dataloader.
+
+        Computes:
+        - validation loss (same formulation as training: CE + BE)
+        - tile accuracy: percentage of fillable (masked in question) tiles predicted correctly
+        - puzzle accuracy: percentage of puzzles with all fillable tiles predicted correctly
+        """
+        self.eval()
+        total_loss = 0.0
+        total_ce_loss = 0.0
+        total_be_loss = 0.0
+        total_tiles = 0
+        total_correct_tiles = 0
+        total_puzzles = 0
+        solved_puzzles = 0
+        for batch in dataloader:
+            y, z, logits, q = self(batch)
+            stats = self._compute_batch_stats(batch, logits, q)
+            batch_size = batch["question_input_ids"].size(0)
+            total_loss += stats["loss"].item() * batch_size
+            total_ce_loss += stats["ce_loss"].item() * batch_size
+            total_be_loss += stats["be_loss"].item() * batch_size
+            total_correct_tiles += stats["correct_masked_tiles"]
+            total_tiles += stats["num_masked_tiles"]
+            solved_puzzles += stats["num_solved_puzzles"]
+            total_puzzles += batch_size
+        avg_loss = total_loss / total_puzzles
+        avg_ce_loss = total_ce_loss / total_puzzles
+        avg_be_loss = total_be_loss / total_puzzles
+        tile_accuracy = total_correct_tiles / max(1, total_tiles)
+        puzzle_accuracy = solved_puzzles / max(1, total_puzzles)
+        metrics = {
+            "val/loss": avg_loss,
+            "val/ce_loss": avg_ce_loss,
+            "val/be_loss": avg_be_loss,
+            "val/tile_accuracy": tile_accuracy,
+            "val/puzzle_accuracy": puzzle_accuracy,
+            "train/step": self.active_train_step,
+            "val/total_correct_tiles": total_correct_tiles,
+            "val/solved_puzzles": solved_puzzles,
+        }
+        print(f"Validation metrics at step {self.active_train_step}: {metrics}")
+        wandb.log(metrics, step=self.active_train_step)
+        self.train()
+        return metrics
+
+    def _compute_batch_stats(self, batch, logits, q):
+        """Compute losses and accuracy metrics for a single batch.
+
+        Returns dict with:
+          loss, ce_loss, be_loss, tile_accuracy, puzzle_accuracy,
+          correct_masked_tiles, num_masked_tiles, num_solved_puzzles
+        """
+        # Prepare CE labels with masking of given tiles
+        ce_labels = batch["answer_input_ids"][:, 1:].reshape(-1).clone()
+        given_mask_flat = batch["question_input_ids"][:, 1:].reshape(-1) != 0
+        ce_labels[given_mask_flat] = -100
+        ce_loss_val = self.ce_loss(logits.view(-1, self.config.vocab_size), ce_labels)
+        y_preds = torch.argmax(logits, dim=-1)
+        y_trues = batch["answer_input_ids"][:, 1:]
+        # Binary head loss based on full sequence correctness (including already given tiles counted as trivially correct)
+        be_loss_val = self.be_loss(q, torch.all(y_trues == y_preds, dim=-1).float())
+        loss = ce_loss_val + be_loss_val
+        # Tile accuracy - only positions that need filling (question tile == 0)
+        fill_mask = batch["question_input_ids"][:, 1:] == 0
+        correct_masked = (y_preds[fill_mask] == y_trues[fill_mask]).sum().item()
+        num_masked = fill_mask.sum().item()
+        tile_acc = correct_masked / num_masked if num_masked > 0 else 0.0
+        # Puzzle solved if all fillable tiles are predicted correctly
+        puzzle_solved_mask = torch.all((y_preds == y_trues) | (batch["question_input_ids"][:, 1:] != 0), dim=-1)
+        num_solved = puzzle_solved_mask.sum().item()
+        puzzle_acc = num_solved / batch["question_input_ids"].size(0)
+        return {
+            "loss": loss,
+            "ce_loss": ce_loss_val,
+            "be_loss": be_loss_val,
+            "tile_accuracy": tile_acc,
+            "puzzle_accuracy": puzzle_acc,
+            "correct_masked_tiles": correct_masked,
+            "num_masked_tiles": num_masked,
+            "num_solved_puzzles": num_solved,
+        }
     
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=1e-4, betas=(0.9, 0.95), weight_decay=1.0)
         return optimizer
 
-    def fit(self, dataloader, num_epochs: Optional[int] = 1, num_steps: Optional[int] = None, warmup_steps: int = 2000):
+    def fit(
+        self,
+        dataloader,
+        num_epochs: Optional[int] = 1,
+        num_steps: Optional[int] = None,
+        warmup_steps: int = 2000,
+        validate_every: Optional[int] = None,
+        val_dataloader: Optional[torch.utils.data.DataLoader] = None,
+        checkpoint_dir: str = "checkpoints",
+        save_top_k: int = 2,
+    ):
         do_end_training = False
         if num_epochs is None and num_steps is None:
             raise ValueError("Either num_epochs or num_steps must be provided.")
@@ -280,6 +361,19 @@ class TRMModel(nn.Module):
         scheduler = get_cosine_schedule_with_warmup(
             optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
         )
+        # Prepare validation dataloader if requested
+        # Checkpoint bookkeeping
+        self._checkpoint_metric_key = "val/tile_accuracy"
+        self._save_top_k = save_top_k
+        self._saved_checkpoints = []  # list of tuples (metric, path)
+        self._checkpoint_dir = os.path.join(checkpoint_dir, getattr(self, 'wandb_run_name', 'run'))
+        if validate_every is not None:
+            if val_dataloader is None:
+                from dataset_processing import get_dataloader as get_data_loader_fn
+                # First 2000 examples of test split per user request
+                val_dataloader = get_data_loader_fn(split="test", batch_size=32, num_samples=2000)
+            os.makedirs(self._checkpoint_dir, exist_ok=True)
+            print(f"Validation enabled: every {validate_every} steps over {len(val_dataloader.dataset)} samples; checkpoints at {self._checkpoint_dir}")
         for epoch in tqdm(range(num_epochs), desc="Epoch Number: "):
             wandb.log({"epoch": epoch})
             if do_end_training:
@@ -299,6 +393,10 @@ class TRMModel(nn.Module):
                     self.active_train_step += 1
                     optimizer.zero_grad()
                     # self.ema.update()
+                    # Validation trigger
+                    if validate_every is not None and (self.active_train_step % validate_every == 0):
+                        val_metrics = self.evaluate(val_dataloader)
+                        self._maybe_save_checkpoint(val_metrics)
                     if num_steps is not None and self.active_train_step >= num_steps:
                         do_end_training = True
                         break
@@ -307,6 +405,41 @@ class TRMModel(nn.Module):
                         break
         wandb.finish()
         return loss
+
+    def _maybe_save_checkpoint(self, val_metrics: dict):
+        """Save model if tile accuracy is among top-k.
+
+        Maintains a list of saved checkpoints sorted descending by metric.
+        Removes oldest (worst) if exceeding k.
+        """
+        metric = val_metrics.get(self._checkpoint_metric_key)
+        if metric is None:
+            return
+        # Decide filename
+        step = val_metrics.get("train/step", self.active_train_step)
+        filename = f"step{step}_tileacc{metric:.4f}.pt"
+        path = os.path.join(self._checkpoint_dir, filename)
+        # Insert into list maintaining order
+        self._saved_checkpoints.append((metric, path))
+        self._saved_checkpoints.sort(key=lambda x: x[0], reverse=True)
+        # If exceeds top-k, pop worst and delete file if existed
+        while len(self._saved_checkpoints) > self._save_top_k:
+            worst_metric, worst_path = self._saved_checkpoints.pop(-1)
+            if os.path.exists(worst_path):
+                try:
+                    os.remove(worst_path)
+                except OSError:
+                    pass
+        # If current path is within top-k (after sorting), save
+        if any(p == path for _, p in self._saved_checkpoints[:self._save_top_k]):
+            # Save state dict (could consider EMA weights optionally)
+            torch.save({
+                "step": step,
+                "metric": metric,
+                "model_state": self.state_dict(),
+                "config": self.config.to_dict(),
+            }, path)
+            print(f"Saved checkpoint: {path} (tile_acc={metric:.4f})")
 
 if __name__ == "__main__":
     model = TRMModel()

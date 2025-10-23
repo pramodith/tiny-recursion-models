@@ -2,28 +2,38 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 import torch
 
-def get_sudoku_dataset(split:str="train", num_samples:int=None):
-    split = split if num_samples is None else f"{split}[:{num_samples}]"
-    dataset = load_dataset("sapientinc/sudoku-extreme-1k", split=split)
-    dataset = dataset.filter(lambda example: len(example["question"])==81)
-    # 0 will be used to indicate a masked token
+def get_sudoku_dataset(split: str = "train", num_samples: int = None):
+    """Load sudoku dataset, optionally truncating to first num_samples examples.
+
+    Args:
+        split: Which split to load (e.g., "train", "test").
+        num_samples: If provided, limit to the first num_samples examples via HF slicing.
+    """
+    hf_split = split if num_samples is None else f"{split}[:{num_samples}]"
+    dataset = load_dataset("sapientinc/sudoku-extreme-1k", split=hf_split)
+    dataset = dataset.filter(lambda example: len(example["question"]) == 81)
+    # 0 indicates a masked tile.
     dataset = dataset.map(
         lambda example: {
             "question": example["question"].replace(".", "0"),
-            "answer": example["answer"].replace(".", "0")
+            "answer": example["answer"].replace(".", "0"),
         },
     )
-    # 10 is bos/cls token, will be used for determining if we should stop recursion early
+    # 10 is BOS/CLS token placed at index 0.
     dataset = dataset.map(
         lambda example: {
             "question_input_ids": [10] + [int(c) for c in example["question"]],
-            "answer_input_ids": [10] + [int(c) for c in example["answer"]]
+            "answer_input_ids": [10] + [int(c) for c in example["answer"]],
         },
     )
     return dataset.select_columns(["question_input_ids", "answer_input_ids"])
 
-def get_dataloader(split:str="train", batch_size:int=32, seed:int=42):
-    dataset = get_sudoku_dataset(split)
+def get_dataloader(split: str = "train", batch_size: int = 32, seed: int = 42, num_samples: int = None):
+    """Return a DataLoader for given split. If num_samples provided, truncate dataset.
+
+    For validation per user request: use num_samples=2000 and split="test".
+    """
+    dataset = get_sudoku_dataset(split, num_samples=num_samples)
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(dataset.with_format("torch"), batch_size=batch_size, shuffle=True, generator=generator)
