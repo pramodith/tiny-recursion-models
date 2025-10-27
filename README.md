@@ -1,6 +1,8 @@
 # tiny-recursion-models
-Reproduction of Less is More: Recursive Reasoning with Tiny Networks
+Reproduction of Less is More: Recursive Reasoning with [Tiny Networks.](https://arxiv.org/pdf/2510.04871)
 
+
+## Algorithm
 ```
 def latent recursion(x, y, z, n=6):
     for i in range(n): # latent reasoning
@@ -30,4 +32,18 @@ for x input, y true in train dataloader:
         opt.zero grad()
         if q hat > 0: # early−stopping
             break
+```
+
+## References
+* Hierarchical Reasoning Model. [Code](https://github.com/sapientinc/HRM/tree/main).
+```
+@misc{wang2025hierarchicalreasoningmodel,
+      title={Hierarchical Reasoning Model}, 
+      author={Guan Wang and Jin Li and Yuhao Sun and Xing Chen and Changling Liu and Yue Wu and Meng Lu and Sen Song and Yasin Abbasi Yadkori},
+      year={2025},
+      eprint={2506.21734},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2506.21734}, 
+}
 ```
