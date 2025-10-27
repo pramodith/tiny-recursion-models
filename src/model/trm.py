@@ -174,6 +174,7 @@ class TRMModel(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss()
         self.be_loss = nn.BCEWithLogitsLoss()
         self.active_train_step = 0
+        self.do_log = do_log
 
         # wandb setup
         if not do_log:
@@ -253,7 +254,8 @@ class TRMModel(nn.Module):
             "train/q_mean": q.mean().item(),
         }
         print(f"Metrics at step {self.active_train_step}: {metrics}")
-        wandb.log(metrics, step=self.active_train_step)
+        if self.do_log:
+            wandb.log(metrics, step=self.active_train_step)
         return loss, y, z, q
 
     @torch.no_grad()
@@ -304,8 +306,11 @@ class TRMModel(nn.Module):
             f"{prefix}/solved_puzzles": solved_puzzles,
         }
         print(f"{prefix.capitalize()} metrics at step {self.active_train_step}: {metrics}")
-        wandb.log(metrics, step=self.active_train_step)
+        if self.do_log:
+            wandb.log(metrics, step=self.active_train_step)
         self.train()
+        if prefix == "test":
+            wandb.finish()
         return metrics
 
     def _compute_batch_stats(self, batch, logits, q):
@@ -384,7 +389,8 @@ class TRMModel(nn.Module):
             os.makedirs(self._checkpoint_dir, exist_ok=True)
             print(f"Validation enabled: every {validate_every} steps over {len(val_dataloader.dataset)} samples; checkpoints at {self._checkpoint_dir}")
         for epoch in tqdm(range(num_epochs), desc="Epoch Number: "):
-            wandb.log({"epoch": epoch})
+            if self.do_log:
+                wandb.log({"epoch": epoch})
             if do_end_training:
                 break
             for batch in tqdm(dataloader, desc="Batch Number: "):
@@ -398,7 +404,8 @@ class TRMModel(nn.Module):
                     scheduler.step()
                     # Log current learning rate
                     current_lr = optimizer.param_groups[0]['lr']
-                    wandb.log({"train/lr": current_lr}, step=self.active_train_step)
+                    if self.do_log:
+                        wandb.log({"train/lr": current_lr}, step=self.active_train_step)
                     self.active_train_step += 1
                     optimizer.zero_grad()
                     # self.ema.update()
@@ -412,7 +419,6 @@ class TRMModel(nn.Module):
                     # Sigmoid(0) = 0.5, so we check if q > 0 for all elements to stop 
                     if torch.all(q > 0):
                         break
-        wandb.finish()
         return loss
 
     def _maybe_save_checkpoint(self, val_metrics: dict):
