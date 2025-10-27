@@ -1,7 +1,8 @@
 # tiny-recursion-models
 Reproduction of Less is More: Recursive Reasoning with [Tiny Networks.](https://arxiv.org/pdf/2510.04871)
 
-## Note: Still Under Development
+## Note
+**The codebase is still under development.** Feel free to fork and tinker yourself!
 
 ## Algorithm
 ```
