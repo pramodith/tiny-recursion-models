@@ -83,6 +83,7 @@ def main():
 		args.train_split,
 		batch_size=args.train_batch_size,
 		num_samples=args.num_train_samples,
+		apply_shuffle=True,
 	)
 	val_loader = None
 	validate_every = args.validate_every if args.validate_every and args.validate_every > 0 else None

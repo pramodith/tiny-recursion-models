@@ -274,7 +274,11 @@ class TRMModel(nn.Module):
         total_puzzles = 0
         solved_puzzles = 0
         for batch in dataloader:
-            y, z, logits, q = self(batch)
+            y, z = None, None
+            for _ in range(self.num_supervisions):
+                y, z, logits, q = self(batch, y, z)
+                if torch.all(q > 0):
+                    break
             stats = self._compute_batch_stats(batch, logits, q)
             batch_size = batch["question_input_ids"].size(0)
             total_loss += stats["loss"].item() * batch_size
